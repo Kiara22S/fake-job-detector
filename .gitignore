@@ -1,5 +1,6 @@
 __pycache__/
 *.pyc
-*.pkl
 .env
 .ipynb_checkpoints
+venv/
+.DS_Store
