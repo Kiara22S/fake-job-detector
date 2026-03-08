@@ -23,16 +23,13 @@ def health_check():
     }
 
 # 4. NEW: Analyze Job Endpoint & Domain Extraction
+import urllib.parse
+
 @app.post("/analyze-job")
 def analyze_job(job_data: JobListing):
-    # Domain Extraction Logic
-    # This pulls 'google.com' out of 'https://google.com/jobs'
-    if job_data.company_url:
-        domain = urllib.parse.urlparse(job_data.company_url).netloc
-    else:
-        domain = "N/A"
+    # This is the "Step 3" logic:
+    domain = urllib.parse.urlparse(job_data.company_url).netloc
     
-    # Store job input in DB
     with Session(engine) as session:
         session.add(job_data)
         session.commit()
@@ -41,5 +38,5 @@ def analyze_job(job_data: JobListing):
     return {
         "status": "analyzed and stored", 
         "job_id": job_data.id, 
-        "extracted_domain": domain
+        "extracted_domain": domain  # Verification for Step 3
     }

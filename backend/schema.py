@@ -9,12 +9,13 @@ class User(SQLModel, table=True):
     email: str = Field(unique=True)
     password: str
 
-# Table 2: JobListings (Matches Kaggle data + ML score)
+# Table 2: JobListings (NOW INCLUDES company_url)
 class JobListing(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     title: str
     company: str
     description: str
+    company_url: str = Field(default="https://unknown.com") # ADDED THIS LINE
     ml_risk_score: float = 0.0
     is_fake: bool = False
 
