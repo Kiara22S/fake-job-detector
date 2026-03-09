@@ -2,9 +2,13 @@ import pandas as pd
 import pickle
 
 from feature_engineering import extract_features, calculate_risk_score
+
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score, classification_report
+from sklearn.feature_extraction.text import TfidfVectorizer
+
+from scipy.sparse import hstack
 
 
 # -----------------------------
@@ -30,7 +34,30 @@ print(df[["risk_score"]].head())
 
 
 # -----------------------------
-# 3 Define Features + Target
+# 3 Combine Text Fields
+# -----------------------------
+
+df["full_text"] = (
+    df["title"].fillna("") + " " +
+    df["description"].fillna("") + " " +
+    df["requirements"].fillna("")
+)
+
+
+# -----------------------------
+# 4 TF-IDF Text Features
+# -----------------------------
+
+tfidf = TfidfVectorizer(
+    stop_words="english",
+    max_features=2000
+)
+
+X_text = tfidf.fit_transform(df["full_text"])
+
+
+# -----------------------------
+# 5 Structured Features
 # -----------------------------
 
 features = [
@@ -40,15 +67,27 @@ features = [
     "salary_mentioned",
     "location_missing",
     "description_length",
-    "risk_score"
+    "risk_score",
+    "new_domain"
 ]
 
-X = df[features]
-y = df["fraudulent"]
+X_structured = df[features].values
 
 
 # -----------------------------
-# 4 Train Test Split
+# 6 Combine Features
+# -----------------------------
+
+X = hstack([X_text, X_structured])
+y = df["fraudulent"]
+
+print("Text feature shape:", X_text.shape)
+print("Structured feature shape:", X_structured.shape)
+print("Final feature shape:", X.shape)
+
+
+# -----------------------------
+# 7 Train Test Split
 # -----------------------------
 
 X_train, X_test, y_train, y_test = train_test_split(
@@ -62,11 +101,12 @@ print("Data Split Complete")
 
 
 # -----------------------------
-# 5 Train Model
+# 8 Train Model
 # -----------------------------
 
 model = RandomForestClassifier(
     n_estimators=200,
+    class_weight="balanced",
     random_state=42
 )
 
@@ -76,7 +116,7 @@ print("Model Training Complete")
 
 
 # -----------------------------
-# 6 Evaluate Model
+# 9 Evaluate Model
 # -----------------------------
 
 predictions = model.predict(X_test)
@@ -90,10 +130,14 @@ print(classification_report(y_test, predictions))
 
 
 # -----------------------------
-# 7 Save Model
+# 10 Save Model
 # -----------------------------
 
 with open("model/model.pkl", "wb") as f:
     pickle.dump(model, f)
 
-print("\nModel saved successfully.")
+# SAVE THIS: The Translator (TF-IDF)
+with open("model/tfidf_vectorizer.pkl", "wb") as f:
+    pickle.dump(tfidf, f)
+
+print("\nModel and Vectorizer saved successfully.")
