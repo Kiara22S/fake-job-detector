@@ -1,7 +1,8 @@
 import pandas as pd
 import re
-
-# ---------- Feature Engineering ----------
+import whois
+from urllib.parse import urlparse
+import datetime
 
 def extract_features(df):
 
@@ -39,6 +40,7 @@ def extract_features(df):
     # Feature 6
     df["location_missing"] = df["location"].apply(lambda x: 1 if x == "" else 0)
 
+    df["company_profile_length"] = df["company_profile"].apply(lambda x: len(x.split()))
     return df
 # ---------- Risk Scoring ----------
 
