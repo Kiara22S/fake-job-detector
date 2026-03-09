@@ -136,4 +136,8 @@ print(classification_report(y_test, predictions))
 with open("model/model.pkl", "wb") as f:
     pickle.dump(model, f)
 
-print("\nModel saved successfully.")
+# SAVE THIS: The Translator (TF-IDF)
+with open("model/tfidf_vectorizer.pkl", "wb") as f:
+    pickle.dump(tfidf, f)
+
+print("\nModel and Vectorizer saved successfully.")
