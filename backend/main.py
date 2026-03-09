@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from backend.schema import JobListing
-from sqlmodel import Session
+from sqlmodel import Session, select
 from backend.database import engine, init_db
 import urllib.parse
 import whois
@@ -10,6 +10,9 @@ from datetime import datetime
 
 # 1. Initialize the FastAPI App
 app = FastAPI(title="Fake Job Detector API")
+
+# High-risk keywords for the scoring engine
+SCAM_KEYWORDS = ["wire transfer", "whatsapp only", "crypto", "no experience", "urgent hire", "package forwarding"]
 
 # 2. Database Initialization on Startup
 @app.on_event("startup")
@@ -49,20 +52,16 @@ def get_security_intel(url: str):
     except:
         return "Error", None, False
 
-# 4. The Core Analyze Endpoint with Structured JSON Output
+# 4. Task: Analyze Job (Ingestion & Feature Extraction)
 @app.post("/analyze-job")
 def analyze_job(job_data: JobListing):
-    # Step 1: Extract Intel (Domain, WHOIS, SSL)
     domain, created_at, ssl_status = get_security_intel(job_data.company_url)
     
-    # Step 2: Store in Postgres
     with Session(engine) as session:
         session.add(job_data)
         session.commit()
         session.refresh(job_data)
     
-    # Step 3: Return Structured JSON Features (Task Complete)
-    # This structure is optimized for ML and Frontend consumption
     return {
         "job_id": job_data.id,
         "status": "analysis_complete",
@@ -70,23 +69,62 @@ def analyze_job(job_data: JobListing):
             "domain_metadata": {
                 "extracted_domain": domain,
                 "creation_date": str(created_at) if created_at else "unknown",
-                # Replace line 73 with this:
                 "domain_age_days": (datetime.now(created_at.tzinfo) - created_at).days if isinstance(created_at, datetime) else None
             },
             "security_validation": {
                 "ssl_valid": ssl_status,
                 "protocol": "https" if ssl_status else "http"
-            },
-            "content_summary": {
-                "title": job_data.title,
-                "company": job_data.company,
-                "desc_length": len(job_data.description)
             }
-        },
-        "ml_ready": True
+        }
     }
 
-# 5. Health Check
+# 5. Task: Risk Score Endpoint (Heuristic Engine)
+@app.post("/risk-score/{job_id}")
+def calculate_risk(job_id: int):
+    with Session(engine) as session:
+        job = session.get(JobListing, job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+        domain, created_at, ssl_status = get_security_intel(job.company_url)
+        
+        score = 0
+        reasons = []
+
+        # Logic A: SSL Check (30% weight)
+        if not ssl_status:
+            score += 30
+            reasons.append("Insecure Connection (No SSL)")
+
+        # Logic B: Domain Age Check (50% weight)
+        if isinstance(created_at, datetime):
+            age_days = (datetime.now(created_at.tzinfo) - created_at).days
+            if age_days < 180:
+                score += 50
+                reasons.append(f"Suspiciously New Domain ({age_days} days)")
+        else:
+            score += 40
+            reasons.append("Unverifiable Domain History")
+
+        # Logic C: Keyword Analysis (20% weight)
+        desc_lower = job.description.lower()
+        if any(word in desc_lower for word in SCAM_KEYWORDS):
+            score += 20
+            reasons.append("Contains High-Risk Recruitment Keywords")
+
+        # Update and Persist Score
+        job.ml_risk_score = min(score, 100) / 100
+        job.is_fake = job.ml_risk_score > 0.6
+        session.add(job)
+        session.commit()
+
+        return {
+            "job_id": job_id,
+            "risk_score_percent": f"{int(job.ml_risk_score * 100)}%",
+            "verdict": "FLAGGED AS FRAUDULENT" if job.is_fake else "VERIFIED AS LOW RISK",
+            "security_flags": reasons
+        }
+
 @app.get("/health")
 def health_check():
     return {"status": "online", "database": "connected"}
