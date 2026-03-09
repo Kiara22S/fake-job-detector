@@ -137,7 +137,7 @@ with open("model/model.pkl", "wb") as f:
     pickle.dump(model, f)
 
 # SAVE THIS: The Translator (TF-IDF)
-with open("model/tfidf_vectorizer.pkl", "wb") as f:
+with open("model/tfidf.pkl", "wb") as f:
     pickle.dump(tfidf, f)
 
 print("\nModel and Vectorizer saved successfully.")
