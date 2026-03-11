@@ -1,183 +1,108 @@
 import pandas as pd
-import pickle
-
-from feature_engineering import extract_features, calculate_risk_score
-
+import joblib
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import accuracy_score, classification_report
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
 
-from scipy.sparse import hstack
-
+# Import your custom logic (Ensure these functions exist in feature_engineering.py)
+from feature_engineering import extract_features, calculate_risk_score
 
 # -----------------------------
-# 1 Load Dataset
+# 1. Dataset Preparation
 # -----------------------------
-
 df = pd.read_csv("data/fake_job_postings.csv")
 
-print("Dataset Loaded")
-
-# Balance the dataset (Random Undersampling)
+# Strategic Undersampling to handle class imbalance (Enterprise standard)
 fraud_jobs = df[df['fraudulent'] == 1]
-real_jobs = df[df['fraudulent'] == 0].sample(n=len(fraud_jobs) * 2, random_state=42) 
-# We take 2x as many real jobs as fakes to keep it realistic but balanced.
-
-df = pd.concat([fraud_jobs, real_jobs]).sample(frac=1, random_state=42) # Shuffle
-# ---------------------------
-
-print(f"Dataset Loaded and Balanced. Total rows: {len(df)}")
-
+real_jobs = df[df['fraudulent'] == 0].sample(n=len(fraud_jobs) * 2, random_state=42)
+df = pd.concat([fraud_jobs, real_jobs]).sample(frac=1, random_state=42)
 
 # -----------------------------
-# 2 Feature Engineering
+# 2. Engineering & Feature Selection
 # -----------------------------
 df = extract_features(df)
-
-print("Features and Risk Metrics Generated")
-print(df[["risk_score", "risk_category"]].head())
-
-# Apply risk scoring
 df["risk_score"] = df.apply(calculate_risk_score, axis=1)
 
-print("Risk Scores Generated")
-print(df[["risk_score"]].head())
-
-
-# -----------------------------
-# 3 Combine Text Fields
-# -----------------------------
-
+# Combine text fields for NLP processing
 df["full_text"] = (
-    df["title"].fillna("") + " " +
-    df["description"].fillna("") + " " +
+    df["title"].fillna("") + " " + 
+    df["description"].fillna("") + " " + 
     df["requirements"].fillna("")
 )
 
-
-# -----------------------------
-# 4 TF-IDF Text Features
-# -----------------------------
-
-tfidf = TfidfVectorizer(
-    stop_words="english",
-    max_features=5000,       # Increased from 2000
-    ngram_range=(1, 2)
-)
-
-X_text = tfidf.fit_transform(df["full_text"])
-
-
-# -----------------------------
-# 5 Structured Features
-# -----------------------------
-
-features = [
-    "gmail_domain",
-    "has_payment_request",
-    "contains_urgent_words",
-    "salary_mentioned",
-    "location_missing",
-    "description_length",
-    "risk_score",
-    "new_domain"
+# Define feature groups
+text_feature = "full_text"
+structured_features = [
+    "gmail_domain", "has_payment_request", "contains_urgent_words",
+    "salary_mentioned", "location_missing", "description_length",
+    "risk_score", "new_domain"
 ]
 
-X_structured = df[features].values
-
-
-# -----------------------------
-# 6 Combine Features
-# -----------------------------
-
-X = hstack([X_text, X_structured])
+X = df[[text_feature] + structured_features]
 y = df["fraudulent"]
 
-print("Text feature shape:", X_text.shape)
-print("Structured feature shape:", X_structured.shape)
-print("Final feature shape:", X.shape)
-
-
 # -----------------------------
-# 7 Train Test Split
+# 3. The Atomic Pipeline Architecture
 # -----------------------------
-
-X_train, X_test, y_train, y_test = train_test_split(
-    X,
-    y,
-    test_size=0.2,
-    random_state=42
+# This block ensures TF-IDF and structured data are handled simultaneously
+preprocessor = ColumnTransformer(
+    transformers=[
+        ('text', TfidfVectorizer(stop_words="english", max_features=5000, ngram_range=(1, 2)), text_feature),
+        ('struct', 'passthrough', structured_features)
+    ]
 )
 
-print("Data Split Complete")
-
-
-# -----------------------------
-# 8 Train Model
-# -----------------------------
-
-model = RandomForestClassifier(
-   n_estimators=500,        # Increased from 200
-   max_depth=30,            # Allows the trees to be more detailed
-   class_weight="balanced", 
-    random_state=42
-)
-
-model.fit(X_train, y_train)
-
-print("Model Training Complete")
-
+# The Full Pipeline: Preprocess -> Classify
+pipeline = Pipeline([
+    ('preprocessor', preprocessor),
+    ('classifier', RandomForestClassifier(
+        n_estimators=500,
+        max_depth=30,
+        class_weight={0: 1, 1: 8},  # 8x penalty for missing a scam (High Recall)
+        random_state=42,
+        n_jobs=-1
+    ))
+])
 
 # -----------------------------
-# 9 Evaluate Model
+# 4. Training & Evaluation
 # -----------------------------
+# 'stratify' ensures training/test sets have the same fraud ratio
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
 
-predictions = model.predict(X_test)
+print("Training Sentinel Production-Grade Pipeline...")
+pipeline.fit(X_train, y_train)
 
+# Metrics
+predictions = pipeline.predict(X_test)
 accuracy = accuracy_score(y_test, predictions)
 
-print("\nModel Accuracy:", accuracy)
+print("\n" + "="*40)
+print(f"MODEL ACCURACY: {accuracy:.2%}")
+print("="*40)
 
-print("\nClassification Report:")
-print(classification_report(y_test, predictions))
-
-
-# -----------------------------
-# 9.1 Feature Importance Extraction
-# -----------------------------
-
-# 1. Get feature names from TF-IDF
-tfidf_features = tfidf.get_feature_names_out()
-
-# 2. Combine with your structured feature names
-all_feature_names = list(tfidf_features) + features
-
-# 3. Get importance values from the Random Forest
-importances = model.feature_importances_
-
-# 4. Create a DataFrame for easy sorting
-feature_importance_df = pd.DataFrame({
-    'Feature': all_feature_names,
-    'Importance': importances
-}).sort_values(by='Importance', ascending=False)
-
-print("\nTop 15 Most Important Features:")
-print(feature_importance_df.head(15))
-
-# Optional: Save this to a CSV for your project report
-feature_importance_df.to_csv("model/feature_importance.csv", index=False)
-
+print("\n--- CLASSIFICATION REPORT ---")
+print(classification_report(y_test, predictions, target_names=['Legitimate', 'Fraudulent']))
 
 # -----------------------------
-# 10 Save Model
+# 5. Feature Importance Extraction (The Proof)
 # -----------------------------
+tfidf_vocab = pipeline.named_steps['preprocessor'].transformers_[0][1].get_feature_names_out()
+all_features = list(tfidf_vocab) + structured_features
+importances = pipeline.named_steps['classifier'].feature_importances_
 
-with open("model/model.pkl", "wb") as f:
-    pickle.dump(model, f)
+importance_df = pd.DataFrame({'Feature': all_features, 'Importance': importances})
+importance_df = importance_df.sort_values(by='Importance', ascending=False)
 
-# SAVE THIS: The Translator (TF-IDF)
-with open("model/tfidf.pkl", "wb") as f:
-    pickle.dump(tfidf, f)
+print("\nTOP 15 FRAUD INDICATORS:")
+print(importance_df.head(15))
 
-print("\nModel and Vectorizer saved successfully.")
+# -----------------------------
+# 6. Exporting the Artifact
+# -----------------------------
+joblib.dump(pipeline, "model/sentinel_pipeline.pkl")
+importance_df.to_csv("model/feature_importance.csv", index=False)
+print("\nSuccess: Production artifact saved at 'model/sentinel_pipeline.pkl'")
