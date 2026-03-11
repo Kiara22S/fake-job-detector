@@ -1,0 +1,6 @@
+2026-03-11 16:36:25,872 [INFO] Path: /docs | Time: 0.0043s | Status: 200
+2026-03-11 16:36:26,101 [INFO] Path: /openapi.json | Time: 0.0294s | Status: 200
+2026-03-11 16:37:10,694 [INFO] Path: /v2/predict | Time: 0.2725s | Status: 200
+2026-03-11 16:38:47,375 [INFO] Path: /analyze-job | Time: 0.9930s | Status: 200
+2026-03-11 16:40:54,792 [INFO] Path: /docs | Time: 0.0012s | Status: 200
+2026-03-11 16:40:54,930 [INFO] Path: /openapi.json | Time: 0.0385s | Status: 200

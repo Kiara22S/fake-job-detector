@@ -2,49 +2,31 @@ from fastapi import FastAPI, HTTPException, Request
 from backend.schema import JobListing
 from sqlmodel import Session, select
 from backend.database import engine, init_db
-import urllib.parse
-import whois
-import ssl
-import socket
-import joblib
+from backend.ml_service import ml_engine  # Import our new Service
 import pandas as pd
-import os
 import logging
 import time
 from datetime import datetime
-from scipy.sparse import hstack
 
 # --- Import Feature Engineering Logic ---
-# Ensure your file in src/ is named feature_engineering.py
 from src.feature_engineering import extract_features
 
 # 1. CONFIGURE LOGGING
-# This creates a file log and a terminal log for observability
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler("app_log.txt"),
-        logging.StreamHandler()
-    ]
+    handlers=[logging.FileHandler("app_log.txt"), logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Fake Job Detector - Production API")
-
-# 2. LOAD ML ASSETS (Model & Vectorizer)
-MODEL_PATH = "model/model.pkl"
-TFIDF_PATH = "model/tfidf.pkl" 
-
-model = joblib.load(MODEL_PATH) if os.path.exists(MODEL_PATH) else None
-tfidf = joblib.load(TFIDF_PATH) if os.path.exists(TFIDF_PATH) else None
+app = FastAPI(title="Fake Job Detector - v2 Modular API")
 
 @app.on_event("startup")
 def on_startup():
     init_db()
-    logger.info(f"🚀 System Startup: Model Loaded={model is not None}, TFIDF Loaded={tfidf is not None}")
+    logger.info("🚀 System Startup: Infrastructure and DB Initialized")
 
-# 3. REQUEST MONITORING MIDDLEWARE
+# 2. MONITORING MIDDLEWARE
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     start_time = time.time()
@@ -53,121 +35,106 @@ async def log_requests(request: Request, call_next):
     logger.info(f"Path: {request.url.path} | Time: {process_time:.4f}s | Status: {response.status_code}")
     return response
 
-# 4. SECURITY INTELLIGENCE HELPER
-def get_security_intel(url: str):
+# --- TASK 2: BUILD ENDPOINT TO CALL MODEL (v2) ---
+@app.post("/v2/predict")
+def predict_only(job_data: JobListing):
+    """Dedicated endpoint for pure ML inference without DB storage."""
     try:
-        domain = urllib.parse.urlparse(url).netloc
-        if not domain: return "Unknown", None, False
+        # Feature Engineering
+        input_df = pd.DataFrame([job_data.dict()])
+        processed_df = extract_features(input_df)
         
-        creation_date = None
-        try:
-            w = whois.whois(domain)
-            creation_date = w.creation_date
-            if isinstance(creation_date, list): creation_date = creation_date[0]
-        except Exception as e:
-            logger.warning(f"WHOIS lookup failed for {domain}: {e}")
-
-        is_ssl_valid = False
-        try:
-            context = ssl.create_default_context()
-            with socket.create_connection((domain, 443), timeout=3) as sock:
-                with context.wrap_socket(sock, server_hostname=domain) as ssock:
-                    ssock.getpeercert()
-                    is_ssl_valid = True
-        except Exception as e:
-            logger.warning(f"SSL check failed for {domain}: {e}")
-
-        return domain, creation_date, is_ssl_valid
+        # Call the new ML Service
+        verdict, probability = ml_engine.predict(job_data, processed_df)
+        
+        return {
+            "verdict": verdict,
+            "model_confidence": f"{int(probability * 100)}%",
+            "is_suspicious": probability > 0.7,
+            "timestamp": datetime.now().isoformat()
+        }
     except Exception as e:
-        logger.error(f"Critical error in security intel gathering: {e}")
-        return "Error", None, False
+        logger.error(f"Prediction Error: {e}")
+        raise HTTPException(status_code=500, detail="ML Inference failed")
 
-# 5. ENDPOINT: ANALYZE AND PERSIST
+# --- REFACTORED MAIN ANALYZE ENDPOINT ---
 @app.post("/analyze-job")
 def analyze_job(job_data: JobListing):
-    # --- STEP A: INPUT VALIDATION ---
     if not job_data.company_url.startswith("http"):
-        logger.warning(f"Malformed URL blocked: {job_data.company_url}")
-        raise HTTPException(status_code=400, detail="Invalid URL. Must start with http:// or https://")
+        raise HTTPException(status_code=400, detail="Invalid URL format")
 
-    logger.info(f"Incoming Request: {job_data.title} at {job_data.company}")
-    
     try:
-        # --- STEP B: TELEMETRY GATHERING ---
-        domain, created_at, ssl_status = get_security_intel(job_data.company_url)
-        
-        # --- STEP C: FEATURE ENGINEERING ---
-        input_df = pd.DataFrame([{
-            "title": job_data.title,
-            "description": job_data.description,
-            "company_profile": getattr(job_data, "company_profile", ""),
-            "location": getattr(job_data, "location", ""),
-            "requirements": getattr(job_data, "requirements", "")
-        }])
-        
+        # 1. Feature Engineering
+        input_df = pd.DataFrame([job_data.dict()])
         processed_df = extract_features(input_df)
-        raw_risk = float(processed_df["risk_score"].iloc[0])
-        # Scale score to 0.0 - 1.0
-        normalized_score = min(raw_risk, 1.0) 
+        
+        # 2. TASK 3: INTEGRATE PROBABILITY INTO RISK SCORE
+        # We get the AI probability and the manual risk_score
+        verdict, ml_prob = ml_engine.predict(job_data, processed_df)
+        heuristic_score = float(processed_df["risk_score"].iloc[0])
+        
+        # Weighted Risk Formula: 70% AI, 30% Rules
+        final_risk_score = (0.7 * ml_prob) + (0.3 * min(heuristic_score, 1.0))
 
-        # --- STEP D: ML INFERENCE ---
-        prediction = "Unverified"
-        if model and tfidf:
-            full_text = f"{job_data.title} {job_data.description} {getattr(job_data, 'requirements', '')}"
-            X_text = tfidf.transform([full_text])
-            
-            features_list = [
-                "gmail_domain", "has_payment_request", "contains_urgent_words",
-                "salary_mentioned", "location_missing", "description_length",
-                "risk_score", "new_domain"
-            ]
-            X_structured = processed_df[features_list].values
-            X_final = hstack([X_text, X_structured])
-            
-            prediction = "Fake" if model.predict(X_final)[0] == 1 else "Real"
-        else:
-            logger.error("Inference bypassed: ML Assets (model/tfidf) missing!")
-
-        # --- STEP E: DATABASE PERSISTENCE ---
+        # 3. Persistence
         with Session(engine) as session:
-            job_data.ml_risk_score = normalized_score
-            job_data.is_fake = (prediction == "Fake")
+            job_data.ml_risk_score = final_risk_score
+            job_data.is_fake = (verdict == "Fake")
             session.add(job_data)
             session.commit()
             session.refresh(job_data)
-            logger.info(f"✅ Record saved to PostgreSQL: ID {job_data.id}")
+            logger.info(f"✅ Record {job_data.id} saved with weighted risk: {final_risk_score:.2f}")
 
-        # --- STEP F: FORMATTED RESPONSE ---
         return {
             "job_id": job_data.id,
-            "verdict": prediction,
-            "risk_level": "LOW" if prediction == "Real" else "HIGH",
+            "verdict": verdict,
+            "risk_level": "LOW" if (verdict == "Real" and final_risk_score < 0.4) else "HIGH",
             "analysis_report": {
-                "confidence_score": f"{int(normalized_score * 100)}%",
-                "security_check": {
-                    "domain": domain,
-                    "ssl_certified": ssl_status,
-                    "domain_age_days": (datetime.now(created_at.tzinfo) - created_at).days if isinstance(created_at, datetime) else 0
-                },
-                "content_flags": {
-                    "payment_detected": bool(processed_df["has_payment_request"].iloc[0]),
-                    "urgent_language": bool(processed_df["contains_urgent_words"].iloc[0])
-                }
+                "combined_confidence": f"{int(final_risk_score * 100)}%",
+                "ml_probability": f"{int(ml_prob * 100)}%",
+                "heuristic_score": f"{int(min(heuristic_score, 1.0) * 100)}%"
             },
-            "metadata": {
-                "timestamp": datetime.now().isoformat(),
-                "log_status": "captured"
-            }
+            "metadata": {"timestamp": datetime.now().isoformat(), "status": "stored"}
         }
 
     except Exception as e:
         logger.critical(f"Pipeline failure: {str(e)}")
-        raise HTTPException(status_code=500, detail="Internal server error during analysis")
+        raise HTTPException(status_code=500, detail="Internal processing error")
 
-# 6. ENDPOINT: RETRIEVE HISTORY
 @app.get("/history")
 def get_history(limit: int = 10):
     with Session(engine) as session:
         statement = select(JobListing).order_by(JobListing.id.desc()).limit(limit)
         results = session.exec(statement).all()
         return {"count": len(results), "records": results}
+
+from sqlmodel import func
+
+@app.get("/stats")
+def get_dashboard_stats():
+    with Session(engine) as session:
+        # 1. Total Count
+        total_jobs = session.scalar(select(func.count(JobListing.id)))
+        
+        # 2. Fake vs Real Count
+        fake_count = session.scalar(select(func.count(JobListing.id)).where(JobListing.is_fake == True))
+        real_count = total_jobs - fake_count if total_jobs else 0
+        
+        # 3. Average Risk Score
+        avg_risk = session.scalar(select(func.avg(JobListing.ml_risk_score))) or 0.0
+        
+        # 4. Success Rate (Percentage of real jobs)
+        accuracy_rate = (real_count / total_jobs * 100) if total_jobs else 0
+        
+        return {
+            "summary": {
+                "total_scanned": total_jobs,
+                "fakes_blocked": fake_count,
+                "legit_jobs": real_count
+            },
+            "analytics": {
+                "system_average_risk": f"{int(avg_risk * 100)}%",
+                "platform_health_score": f"{int(accuracy_rate)}%"
+            },
+            "timestamp": datetime.now().isoformat()
+        }        
