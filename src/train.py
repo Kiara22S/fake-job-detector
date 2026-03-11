@@ -19,12 +19,24 @@ df = pd.read_csv("data/fake_job_postings.csv")
 
 print("Dataset Loaded")
 
+# Balance the dataset (Random Undersampling)
+fraud_jobs = df[df['fraudulent'] == 1]
+real_jobs = df[df['fraudulent'] == 0].sample(n=len(fraud_jobs) * 2, random_state=42) 
+# We take 2x as many real jobs as fakes to keep it realistic but balanced.
+
+df = pd.concat([fraud_jobs, real_jobs]).sample(frac=1, random_state=42) # Shuffle
+# ---------------------------
+
+print(f"Dataset Loaded and Balanced. Total rows: {len(df)}")
+
 
 # -----------------------------
 # 2 Feature Engineering
 # -----------------------------
-
 df = extract_features(df)
+
+print("Features and Risk Metrics Generated")
+print(df[["risk_score", "risk_category"]].head())
 
 # Apply risk scoring
 df["risk_score"] = df.apply(calculate_risk_score, axis=1)
@@ -50,7 +62,8 @@ df["full_text"] = (
 
 tfidf = TfidfVectorizer(
     stop_words="english",
-    max_features=2000
+    max_features=5000,       # Increased from 2000
+    ngram_range=(1, 2)
 )
 
 X_text = tfidf.fit_transform(df["full_text"])
@@ -105,8 +118,9 @@ print("Data Split Complete")
 # -----------------------------
 
 model = RandomForestClassifier(
-    n_estimators=200,
-    class_weight="balanced",
+   n_estimators=500,        # Increased from 200
+   max_depth=30,            # Allows the trees to be more detailed
+   class_weight="balanced", 
     random_state=42
 )
 
@@ -127,6 +141,32 @@ print("\nModel Accuracy:", accuracy)
 
 print("\nClassification Report:")
 print(classification_report(y_test, predictions))
+
+
+# -----------------------------
+# 9.1 Feature Importance Extraction
+# -----------------------------
+
+# 1. Get feature names from TF-IDF
+tfidf_features = tfidf.get_feature_names_out()
+
+# 2. Combine with your structured feature names
+all_feature_names = list(tfidf_features) + features
+
+# 3. Get importance values from the Random Forest
+importances = model.feature_importances_
+
+# 4. Create a DataFrame for easy sorting
+feature_importance_df = pd.DataFrame({
+    'Feature': all_feature_names,
+    'Importance': importances
+}).sort_values(by='Importance', ascending=False)
+
+print("\nTop 15 Most Important Features:")
+print(feature_importance_df.head(15))
+
+# Optional: Save this to a CSV for your project report
+feature_importance_df.to_csv("model/feature_importance.csv", index=False)
 
 
 # -----------------------------
