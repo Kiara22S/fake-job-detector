@@ -91,3 +91,4 @@ def extract_features(df):
     df["risk_category"] = df["risk_score"].apply(get_risk_category)
     
     return df
+
