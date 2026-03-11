@@ -41,25 +41,27 @@ def analyze_job(job_data: JobListing):
         input_df = pd.DataFrame([job_data.dict()])
         processed_df = extract_features(input_df)
         
-        verdict, ml_prob = ml_engine.predict(job_data, processed_df)
+        # 1. We now get 'report' (Kiara's work) from our ml_engine
+        verdict, ml_prob, report = ml_engine.predict(job_data, processed_df)
+        
         heuristic_score = float(processed_df["risk_score"].iloc[0])
         final_risk = (0.7 * ml_prob) + (0.3 * min(heuristic_score, 1.0))
 
         with Session(engine) as session:
             job_data.ml_risk_score = final_risk
             job_data.is_fake = (verdict == "Fake")
-            job_data.model_version = ml_engine.version # SAVING VERSION
+            job_data.model_version = ml_engine.version
             session.add(job_data)
             session.commit()
             session.refresh(job_data)
 
-        # --- TASK: FORMAT STRUCTURED RESPONSE JSON ---
+        # 2. Return your HIGH-LEVEL JSON structure
         return {
             "success": True,
             "data": {
                 "job_id": job_data.id,
                 "verdict": verdict,
-                "risk_level": "LOW" if (verdict == "Real" and final_risk < 0.4) else "HIGH",
+                "risk_details": report, # <--- Kiara's logic plugged in here
                 "scoring": {
                     "combined_confidence": round(final_risk, 4),
                     "ml_probability": round(ml_prob, 4),
