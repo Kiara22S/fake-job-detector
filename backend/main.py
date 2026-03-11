@@ -14,10 +14,12 @@ import time
 from datetime import datetime
 from scipy.sparse import hstack
 
-# --- Import ML Logic ---
+# --- Import Feature Engineering Logic ---
+# Ensure your file in src/ is named feature_engineering.py
 from src.feature_engineering import extract_features
 
-# 1. SETUP LOGGING
+# 1. CONFIGURE LOGGING
+# This creates a file log and a terminal log for observability
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -30,6 +32,7 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Fake Job Detector - Production API")
 
+# 2. LOAD ML ASSETS (Model & Vectorizer)
 MODEL_PATH = "model/model.pkl"
 TFIDF_PATH = "model/tfidf.pkl" 
 
@@ -41,19 +44,21 @@ def on_startup():
     init_db()
     logger.info(f"🚀 System Startup: Model Loaded={model is not None}, TFIDF Loaded={tfidf is not None}")
 
-# 2. MIDDLEWARE FOR REQUEST LOGGING
+# 3. REQUEST MONITORING MIDDLEWARE
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     start_time = time.time()
     response = await call_next(request)
     process_time = time.time() - start_time
-    logger.info(f"Path: {request.url.path} | Duration: {process_time:.4f}s | Status: {response.status_code}")
+    logger.info(f"Path: {request.url.path} | Time: {process_time:.4f}s | Status: {response.status_code}")
     return response
 
+# 4. SECURITY INTELLIGENCE HELPER
 def get_security_intel(url: str):
     try:
         domain = urllib.parse.urlparse(url).netloc
         if not domain: return "Unknown", None, False
+        
         creation_date = None
         try:
             w = whois.whois(domain)
@@ -74,77 +79,92 @@ def get_security_intel(url: str):
 
         return domain, creation_date, is_ssl_valid
     except Exception as e:
-        logger.error(f"Critical error in security intel: {e}")
+        logger.error(f"Critical error in security intel gathering: {e}")
         return "Error", None, False
 
+# 5. ENDPOINT: ANALYZE AND PERSIST
 @app.post("/analyze-job")
 def analyze_job(job_data: JobListing):
-    logger.info(f"Analyzing job: {job_data.title} at {job_data.company}")
-    
-    # Intelligence Gathering
-    domain, created_at, ssl_status = get_security_intel(job_data.company_url)
-    
-    # Feature Engineering
-    input_df = pd.DataFrame([{
-        "title": job_data.title,
-        "description": job_data.description,
-        "company_profile": getattr(job_data, "company_profile", ""),
-        "location": getattr(job_data, "location", ""),
-        "requirements": getattr(job_data, "requirements", "")
-    }])
-    processed_df = extract_features(input_df)
-    raw_risk = float(processed_df["risk_score"].iloc[0])
-    normalized_score = min(raw_risk, 1.0) 
+    # --- STEP A: INPUT VALIDATION ---
+    if not job_data.company_url.startswith("http"):
+        logger.warning(f"Malformed URL blocked: {job_data.company_url}")
+        raise HTTPException(status_code=400, detail="Invalid URL. Must start with http:// or https://")
 
-    # ML Inference
-    prediction = "Unverified"
-    if model and tfidf:
-        full_text = f"{job_data.title} {job_data.description} {getattr(job_data, 'requirements', '')}"
-        X_text = tfidf.transform([full_text])
-        features_list = ["gmail_domain", "has_payment_request", "contains_urgent_words",
-                         "salary_mentioned", "location_missing", "description_length",
-                         "risk_score", "new_domain"]
-        X_structured = processed_df[features_list].values
-        X_final = hstack([X_text, X_structured])
-        prediction = "Fake" if model.predict(X_final)[0] == 1 else "Real"
-
-    # --- TASK: STORE RISK REPORT IN DB ---
+    logger.info(f"Incoming Request: {job_data.title} at {job_data.company}")
+    
     try:
+        # --- STEP B: TELEMETRY GATHERING ---
+        domain, created_at, ssl_status = get_security_intel(job_data.company_url)
+        
+        # --- STEP C: FEATURE ENGINEERING ---
+        input_df = pd.DataFrame([{
+            "title": job_data.title,
+            "description": job_data.description,
+            "company_profile": getattr(job_data, "company_profile", ""),
+            "location": getattr(job_data, "location", ""),
+            "requirements": getattr(job_data, "requirements", "")
+        }])
+        
+        processed_df = extract_features(input_df)
+        raw_risk = float(processed_df["risk_score"].iloc[0])
+        # Scale score to 0.0 - 1.0
+        normalized_score = min(raw_risk, 1.0) 
+
+        # --- STEP D: ML INFERENCE ---
+        prediction = "Unverified"
+        if model and tfidf:
+            full_text = f"{job_data.title} {job_data.description} {getattr(job_data, 'requirements', '')}"
+            X_text = tfidf.transform([full_text])
+            
+            features_list = [
+                "gmail_domain", "has_payment_request", "contains_urgent_words",
+                "salary_mentioned", "location_missing", "description_length",
+                "risk_score", "new_domain"
+            ]
+            X_structured = processed_df[features_list].values
+            X_final = hstack([X_text, X_structured])
+            
+            prediction = "Fake" if model.predict(X_final)[0] == 1 else "Real"
+        else:
+            logger.error("Inference bypassed: ML Assets (model/tfidf) missing!")
+
+        # --- STEP E: DATABASE PERSISTENCE ---
         with Session(engine) as session:
             job_data.ml_risk_score = normalized_score
             job_data.is_fake = (prediction == "Fake")
             session.add(job_data)
             session.commit()
             session.refresh(job_data)
-            logger.info(f"✅ Job report stored in DB with ID: {job_data.id}")
-    except Exception as e:
-        logger.error(f"❌ Database insertion failed: {e}")
-        raise HTTPException(status_code=500, detail="Database error")
+            logger.info(f"✅ Record saved to PostgreSQL: ID {job_data.id}")
 
-    # --- TASK: UPDATE RESPONSE FORMAT ---
-    return {
-        "job_id": job_data.id,
-        "verdict": prediction,
-        "risk_level": "LOW" if prediction == "Real" else "HIGH",
-        "analysis_report": {
-            "confidence_score": f"{int(normalized_score * 100)}%",
-            "security_check": {
-                "domain": domain,
-                "ssl_certified": ssl_status,
-                "domain_age_days": (datetime.now(created_at.tzinfo) - created_at).days if isinstance(created_at, datetime) else 0
+        # --- STEP F: FORMATTED RESPONSE ---
+        return {
+            "job_id": job_data.id,
+            "verdict": prediction,
+            "risk_level": "LOW" if prediction == "Real" else "HIGH",
+            "analysis_report": {
+                "confidence_score": f"{int(normalized_score * 100)}%",
+                "security_check": {
+                    "domain": domain,
+                    "ssl_certified": ssl_status,
+                    "domain_age_days": (datetime.now(created_at.tzinfo) - created_at).days if isinstance(created_at, datetime) else 0
+                },
+                "content_flags": {
+                    "payment_detected": bool(processed_df["has_payment_request"].iloc[0]),
+                    "urgent_language": bool(processed_df["contains_urgent_words"].iloc[0])
+                }
             },
-            "content_flags": {
-                "payment_detected": bool(processed_df["has_payment_request"].iloc[0]),
-                "urgent_language": bool(processed_df["contains_urgent_words"].iloc[0]),
-                "free_email_provider": bool(processed_df["gmail_domain"].iloc[0])
+            "metadata": {
+                "timestamp": datetime.now().isoformat(),
+                "log_status": "captured"
             }
-        },
-        "metadata": {
-            "timestamp": datetime.now().isoformat(),
-            "log_status": "captured"
         }
-    }
 
+    except Exception as e:
+        logger.critical(f"Pipeline failure: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error during analysis")
+
+# 6. ENDPOINT: RETRIEVE HISTORY
 @app.get("/history")
 def get_history(limit: int = 10):
     with Session(engine) as session:
