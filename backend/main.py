@@ -53,15 +53,28 @@ def analyze_job(job_data: JobListing):
             session.commit()
             session.refresh(job_data)
 
+        # --- TASK: FORMAT STRUCTURED RESPONSE JSON ---
         return {
-            "job_id": job_data.id,
-            "verdict": verdict,
-            "risk_level": "LOW" if (verdict == "Real" and final_risk < 0.4) else "HIGH",
-            "analysis_report": {
-                "combined_confidence": f"{int(final_risk * 100)}%",
-                "model_used": ml_engine.version
+            "success": True,
+            "data": {
+                "job_id": job_data.id,
+                "verdict": verdict,
+                "risk_level": "LOW" if (verdict == "Real" and final_risk < 0.4) else "HIGH",
+                "scoring": {
+                    "combined_confidence": round(final_risk, 4),
+                    "ml_probability": round(ml_prob, 4),
+                    "heuristic_score": round(min(heuristic_score, 1.0), 4)
+                },
+                "lineage": {
+                    "model_version": ml_engine.version,
+                    "engine_type": "RandomForest-Weighted",
+                    "processed_at": datetime.now().isoformat()
+                }
             },
-            "metadata": {"timestamp": datetime.now().isoformat()}
+            "flags": {
+                "is_suspicious_domain": "xyz" in job_data.company_url or "top" in job_data.company_url,
+                "high_risk_detected": final_risk > 0.7
+            }
         }
     except Exception as e:
         logger.critical(f"Analysis failure: {e}")
@@ -82,4 +95,8 @@ def get_dashboard_stats():
 def get_history(limit: int = 10):
     with Session(engine) as session:
         results = session.exec(select(JobListing).order_by(JobListing.id.desc()).limit(limit)).all()
-        return {"records": results}
+        return {
+            "success": True,
+            "count": len(results),
+            "records": results
+        }
