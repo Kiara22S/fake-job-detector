@@ -1,5 +1,11 @@
+from fastapi import FastAPI, HTTPException, Request, Depends  # Add 'Depends'
+from fastapi.security import OAuth2PasswordRequestForm       # For Login
+from backend.auth import create_access_token, verify_password, get_current_user # Our new service
+# ... keep your existing imports below
+
+
 from fastapi import FastAPI, HTTPException, Request
-from backend.schema import JobListing
+from backend.schema import JobListing,User
 from sqlmodel import Session, select, func
 from backend.database import engine, init_db
 from backend.ml_service import ml_engine
@@ -32,8 +38,20 @@ async def log_requests(request: Request, call_next):
     logger.info(f"Path: {request.url.path} | Latency: {process_time:.4f}s")
     return response
 
+@app.post("/login")
+def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    with Session(engine) as session:
+        # Check if user exists in the DB
+        user = session.exec(select(User).where(User.username == form_data.username)).first()
+        if not user or not verify_password(form_data.password, user.hashed_password):
+            raise HTTPException(status_code=400, detail="Incorrect username or password")
+        
+        # Create the JWT
+        access_token = create_access_token(data={"sub": user.username})
+        return {"access_token": access_token, "token_type": "bearer"}
+
 @app.post("/analyze-job")
-def analyze_job(job_data: JobListing):
+def analyze_job(job_data: JobListing ,current_user: str = Depends(get_current_user)):
     if not job_data.company_url.startswith("http"):
         raise HTTPException(status_code=400, detail="Invalid URL format")
 
@@ -94,7 +112,7 @@ def get_dashboard_stats():
         }
 
 @app.get("/history")
-def get_history(limit: int = 10):
+def get_history(limit: int = 10 ,current_user: str = Depends(get_current_user)):
     with Session(engine) as session:
         results = session.exec(select(JobListing).order_by(JobListing.id.desc()).limit(limit)).all()
         return {

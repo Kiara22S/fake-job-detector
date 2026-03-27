@@ -1,3 +1,6 @@
+from sqlmodel import SQLModel, Field, JSON, Column  # Import JSON and Column
+from typing import Optional, Dict, Any
+
 from sqlmodel import SQLModel, Field
 from typing import Optional
 from datetime import datetime
