@@ -12,7 +12,7 @@ from feature_engineering import extract_features, calculate_risk_score
 
 # -----------------------------
 # 1. Dataset Preparation
-# -----------------------------
+# -------------- ---------------
 df = pd.read_csv("data/fake_job_postings.csv")
 
 # Strategic Undersampling to handle class imbalance (Enterprise standard)
